@@ -7,7 +7,8 @@ from typing import List
 import tensorflow as tf
 import cv2
 import typing
-from tensorflow.keras.layers import Input, Dense, LSTM, TimeDistributed, BatchNormalization, Concatenate, Activation
+from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, BatchNormalization, Activation, Lambda, \
+    Concatenate
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
 from tensorflow.keras.metrics import mean_absolute_error
@@ -139,6 +140,52 @@ def load_tf_records(records_path,
     return dataset
 
 
+def pool_layer(prev_layer,
+               pool_size,
+               conv_layer_size):
+    '''
+    Makes a pooling layer for the PSP Net
+    :param prev_layer: The previous layer, which would be the input to the PSPNet module
+    :param pool_size: The size that we are making an average pool from
+    :param conv_layer_size: The number of filters in the convolutional layer
+    :return: PSPNet style pooling layer that has been properly resized
+    '''
+    curr = AveragePooling2D(pool_size,
+                            data_format='channels_last',
+                            strides=pool_size,
+                            padding='same')(prev_layer)
+    # while it might be strange to look at a 1x1 conv layer, this is what the paper says.
+    curr = Conv2D(conv_layer_size,
+                  kernel_size=(1, 1),
+                  strides=(1, 1),
+                  data_format='channels_last',
+                  padding='same',
+                  use_bias=False)(curr)
+    curr = BatchNormalization()(curr)
+    curr = Activation('relu')(curr)
+    # now we need to resize the image
+    resize_shape = tf.shape(prev_layer)[1:3] # the first and last dimensions are meaningless
+    curr = Lambda(lambda curr: tf.image.resize(curr, resize_shape))(curr)
+    return curr
+
+def make_psp_module(prev_layer,
+                    pool_factors=None):
+    '''
+    Makes a PSP Model
+    :param prev_layer: The last layer from the traditional CNN
+    :param pool_factors: A list of the different pool factors, defaults to [1, 2, 3, 6], as per the PSPNet paper
+    :return: A PSPNet Module that can be used as a simple layer in the model.
+    '''
+    if pool_factors is None:
+        pool_factors = [1, 2, 3, 6]
+    last_size = tf.shape(prev_layer)[-1]
+    out_layers = [prev_layer]
+    for factor in pool_factors:
+        out_layers.append(pool_layer(prev_layer, factor, last_size))
+    # combine all the layers together
+    curr = Concatenate(axis=-1)(out_layers)
+    return curr
+
 def main():
     # the constants that we use, and need to go with from the start
     batch_size = 64
@@ -192,11 +239,11 @@ def main():
     if coarse_train and train_model:
         # now its time to assemble the data from 1st train with the gt coarse labels for training and validation data
         train_ds = load_tf_records(records_path=os.path.join(record_root, 'train1'),
-                                     image_res=input_image_res,
-                                     batch_size=batch_size)
-        val_ds = load_tf_records(records_path=os.path.join(record_root, 'val1'),
                                    image_res=input_image_res,
                                    batch_size=batch_size)
+        val_ds = load_tf_records(records_path=os.path.join(record_root, 'val1'),
+                                 image_res=input_image_res,
+                                 batch_size=batch_size)
         # all testing will be done with the test dataset a.k.a val dataset for these trains
         test_ds = val_ds
         # model construction here
