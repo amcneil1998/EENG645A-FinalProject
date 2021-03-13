@@ -1,24 +1,41 @@
 import numpy as np
 import os
-import pandas as pd
-import re
-from typing import List
-
 import tensorflow as tf
 import cv2
-import typing
 from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, BatchNormalization, Activation, Lambda, \
     Concatenate
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
-from tensorflow.keras.metrics import mean_absolute_error
-import tensorflow_probability as tfp
+from tensorflow.keras.losses import sparse_categorical_crossentropy
 from tensorflow.keras.models import Model
-import tensorflow.keras.backend as K
+from tensorflow.keras.applications import ResNet50, InceptionV3
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-from tqdm.keras import TqdmCallback
 
+
+# my plot history function from last lab
+def plot_history(hist):
+    '''
+    Plots Accuracy and Loss for Model training
+    :param hist:
+    :return:
+    '''
+    plt.figure()
+    plt.plot(hist.history['loss'], label="Train")
+    plt.plot(hist.history['val_loss'], label="Validation")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title("Losses")
+    plt.grid()
+    plt.legend()
+    plt.figure()
+    plt.plot(hist.history['acc'], label="Train")
+    plt.plot(hist.history['val_acc'], label="Validation")
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.title("Accuracies")
+    plt.grid()
+    plt.legend()
+    plt.show()
 
 def _bytes_feature(value):
     """Returns a bytes_list from a string / byte., thanks Joe"""
@@ -247,8 +264,44 @@ def main():
         # all testing will be done with the test dataset a.k.a val dataset for these trains
         test_ds = val_ds
         # model construction here
-
+        in_layer = Input((input_image_res[0], input_image_res[1], 3))
+        res_net = ResNet50(include_top=False,
+                           weights='imagenet',
+                           input_tensor=in_layer,
+                           pooling=None)
+        inception_net = InceptionV3(include_top=False,
+                                    weights='imagenet',
+                                    input_tensor=in_layer,
+                                    pooling=None)
+        curr = Concatenate(axis=-1)(res_net, inception_net)
+        curr = make_psp_module(curr)
+        curr = Conv2D(128,
+                      (3, 3),
+                      activation='relu')(curr)
+        curr = Lambda(lambda x: tf.image.resize(x, input_image_res))(curr)
+        out_layer = Dense(34,
+                          activation='softmax')(curr)
+        model = Model(in_layer, out_layer)
+        model.compile(loss=sparse_categorical_crossentropy,
+                      optimizer=RMSprop(lr=0.00),
+                      metrics=['accuracy'])
+        reduce_lr = ReduceLROnPlateau(monitor='loss',
+                                      factor=0.75,
+                                      patience=6,
+                                      verbose=1,
+                                      mode='auto',
+                                      min_delta=0.01,
+                                      cooldown=2,
+                                      min_lr=0.000001)
+        hist = model.fit(train_ds,
+                         steps_per_epoch=64,
+                         num_epochs=5,
+                         validation_data=val_ds,
+                         use_multiprocessing=True,
+                         workers=4,
+                         callbacks=[reduce_lr])
         model.save("coarse_" + base_model_name)
+        plot_history(hist)
     if fine_train and train_model:
         train_ds = load_tf_records(records_path=os.path.join(record_root, 'train2'),
                                    image_res=input_image_res,
