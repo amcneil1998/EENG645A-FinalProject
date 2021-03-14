@@ -10,7 +10,16 @@ perform a one time parse of the data into TF record files and store them in:
 
     /opt/data/CityScapes
 
+This project also requires lots of disk space.  With retaining the original zip
+folders in the /opt/data/FinalProject/CityScapes folder this folder is now 122.3GB.
+Creating the TF record files takes 214GB of disk space in /opt/data/CityScapes.  Make sure
+that this space is available before starting to run the script.  Running the script takes a while
+to make the TF record files.  On my machine it took around 1/2 an hour.
 # Running
 Assuming that you have your system set up to allow tensorflow GPU access in a docker container run with:
 
     docker-compose up --build
+
+# The mount commands
+    sudo mount /dev/nvme0n1p4 /opt/data/CityScapes/
+    sudo mount /dev/sda2 /opt/data/FinalProject/

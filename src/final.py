@@ -86,13 +86,16 @@ def make_tf_records(input_loc,
     # now its time to load the images
     num_images = len(input_files)
     num_records = int(num_images / max_per_record) + 1
-    tf_record_names = [save_loc + f'data{idx}' for idx in range(num_records)]
+    tf_record_names = [save_loc + f'/data{idx}' for idx in range(num_records)]
     record_index = 0
 
     # loop over each tf record, i=tf record
     for i in range(num_records):
         with tf.io.TFRecordWriter(str(tf_record_names[i])) as writer:
-            for j in range(record_index, record_index + max_per_record):
+            end_point = record_index + max_per_record
+            if end_point > len(input_files):
+                end_point = len(input_files)
+            for j in range(record_index, end_point):
                 # load the input image
                 in_img = cv2.imread(input_files[j])
                 # the labels are stored identically across all 3 channels on these images
@@ -104,11 +107,12 @@ def make_tf_records(input_loc,
                     'input': _bytes_feature(in_bytes),
                     'output': _bytes_feature(out_bytes)
                 }
-                feature = tf.train.Feature(feature=data)
-                example = tf.train.Example(feature=feature)
+                feature = tf.train.Features(feature=data)
+                example = tf.train.Example(features=feature)
                 serialized = example.SerializeToString()
                 writer.write(serialized)
         # this gets us the correct index and we only have to think in terms of i and j
+        print("Processed " + str(record_index) + " Images")
         record_index += 4500
 
 def load_tf_records(records_path,
@@ -141,7 +145,7 @@ def load_tf_records(records_path,
         x_done = tf.image.resize(x_full_res, image_res)
         y_sample = parsed['input']
         y_raw = tf.io.decode_raw(y_sample, np.uint8)
-        y_full_res = tf.cast(tf.reshape(y_raw, (1024, 2048)), tf.float32)
+        y_full_res = tf.cast(tf.reshape(y_raw, (1024, 2048, 1)), tf.float32)
         y_done = tf.image.resize(y_full_res, image_res)
         return x_done, y_done
     filenames_list = os.listdir(records_path)
@@ -211,7 +215,7 @@ def main():
     data_root = os.path.join("/opt", "data")
     record_root = os.path.join(data_root, "CityScapes")
     train_model = True
-    make_records = True
+    make_records = False
     coarse_train = True
     fine_train = False
     use_test = False
@@ -221,16 +225,16 @@ def main():
     if make_records:
         raw_data_root = os.path.join(data_root, "FinalProject", "CityScapes")
         # the testing takes place on the finely labeled images
-        test_in_loc = os.path.join(raw_data_root, "leftimg8bit", "test")
+        test_in_loc = os.path.join(raw_data_root, "leftImg8bit", "test")
         test_out_loc = os.path.join(raw_data_root, "gtFine", "test")
         # the first round of training takes place on the coarse images
-        first_train_in_loc = os.path.join(raw_data_root, "leftimg8bit", "train_extra")
+        first_train_in_loc = os.path.join(raw_data_root, "leftImg8bit", "train_extra")
         first_train_out_loc = os.path.join(raw_data_root, "gtCoarse", "train_extra")
-        first_val_in_loc = os.path.join(raw_data_root, "leftimg8bit", "val")
+        first_val_in_loc = os.path.join(raw_data_root, "leftImg8bit", "val")
         first_val_out_loc = os.path.join(raw_data_root, "gtCoarse", "val")
-        second_train_in_loc = os.path.join(raw_data_root, "leftimg8bit", "train")
+        second_train_in_loc = os.path.join(raw_data_root, "leftImg8bit", "train")
         second_train_out_loc = os.path.join(raw_data_root, "gtFine", "train")
-        second_val_in_loc = os.path.join(raw_data_root, "leftimg8bit", "val")
+        second_val_in_loc = os.path.join(raw_data_root, "leftImg8bit", "val")
         second_val_out_loc = os.path.join(raw_data_root, "gtFine", "val")
         # test data
         make_tf_records(input_loc=test_in_loc,
