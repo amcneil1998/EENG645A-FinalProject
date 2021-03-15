@@ -1,4 +1,5 @@
 import numpy as np
+import itertools
 import os
 import tensorflow as tf
 import cv2
@@ -6,12 +7,12 @@ from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, Batc
     Concatenate
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
-from tensorflow.keras.losses import sparse_categorical_crossentropy
-from tensorflow.keras.models import Model
+from tensorflow.keras.losses import CategoricalCrossentropy
+from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.applications import ResNet50, VGG19
 import tensorflow.keras.backend as K
 import matplotlib.pyplot as plt
-
+import sklearn.metrics
 
 # my plot history function from last lab
 def plot_history(hist):
@@ -29,14 +30,48 @@ def plot_history(hist):
     plt.grid()
     plt.legend()
     plt.figure()
-    plt.plot(hist.history['acc'], label="Train")
-    plt.plot(hist.history['val_acc'], label="Validation")
+    plt.plot(hist.history['accuracy'], label="Train")
+    plt.plot(hist.history['val_accuracy'], label="Validation")
     plt.xlabel("Epochs")
     plt.ylabel("Accuracy")
     plt.title("Accuracies")
     plt.grid()
     plt.legend()
     plt.show()
+
+def plot_confusion_matrix(cm, classes,
+                          normalize=False,
+                          title='Confusion matrix',
+                          cmap=plt.cm.Blues):
+    """
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    """
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
 
 def _bytes_feature(value):
     """Returns a bytes_list from a string / byte., thanks Joe"""
@@ -146,8 +181,10 @@ def load_tf_records(records_path,
         x_done = tf.image.resize(x_full_res, image_res)
         y_sample = parsed['input']
         y_raw = tf.io.decode_raw(y_sample, np.uint8)
-        y_full_res = tf.cast(tf.reshape(y_raw, (1024, 2048, 3)), tf.float32)
-        y_done = tf.image.resize(y_full_res, image_res)[:, :, 0:1]
+        y_full_res = tf.reshape(y_raw, (1024, 2048, 3))
+        y_vals = tf.cast(tf.image.resize(y_full_res, image_res)[:, :, 0], tf.int32)
+        y_done = tf.one_hot(indices=y_vals,
+                            depth=34)
         return x_done, y_done
     filenames_list = os.listdir(records_path)
     filename_strings = [os.path.join(records_path, filename) for filename in filenames_list]
@@ -181,6 +218,7 @@ def pool_layer(prev_layer,
     curr = Conv2D(conv_layer_size,
                   kernel_size=(1, 1),
                   strides=(1, 1),
+                  activation='relu',
                   data_format='channels_last',
                   padding='same')(curr)
     curr = BatchNormalization()(curr)
@@ -216,16 +254,20 @@ def make_psp_module(prev_layer,
 
 def main():
     # the constants that we use, and need to go with from the start
-    batch_size = 64
+    batch_size = 16
+    num_classes = 34
+    num_epochs = 50
+    steps_per_epoch = 32
+    num_epochs_fine = 10
     # (Width, Height)
-    input_image_res = (1024, 2048)
+    input_image_res = (192, 384)
     data_root = os.path.join("/opt", "data")
     record_root = os.path.join(data_root, "CityScapes")
-    train_model = True
-    make_records = True
+    make_records = False
     coarse_train = True
-    fine_train = False
+    fine_train = True
     use_test = False
+    test_num = 1000
     base_model_name = "model.h5"
     force_model_name = "FinalModel.h5"
 
@@ -264,7 +306,7 @@ def main():
                         output_loc=second_val_out_loc,
                         save_loc=os.path.join(record_root, "val2"))
 
-    if coarse_train and train_model:
+    if coarse_train:
         # now its time to assemble the data from 1st train with the gt coarse labels for training and validation data
         train_ds = load_tf_records(records_path=os.path.join(record_root, 'train1'),
                                    image_res=input_image_res,
@@ -282,15 +324,15 @@ def main():
                            input_shape=(input_image_res[0], input_image_res[1], 3),
                            pooling=None)(in_layer)
         res_net.trainable = False
-        inception_net = VGG19(include_top=False,
-                              weights='imagenet',
-                              input_tensor=in_layer,
-                              input_shape=(input_image_res[0], input_image_res[1], 3),
-                              pooling=None)(in_layer)
-        inception_net.trainable = False
-        curr = Concatenate()([res_net, inception_net])
-        curr = make_psp_module(curr, [1, 2, 4, 8])
-        curr = Conv2D(1,
+        vgg_net = VGG19(include_top=False,
+                        weights='imagenet',
+                        input_tensor=in_layer,
+                        input_shape=(input_image_res[0], input_image_res[1], 3),
+                        pooling=None)(in_layer)
+        vgg_net.trainable = False
+        curr = Concatenate()([res_net, vgg_net])
+        curr = make_psp_module(curr, [1, 2, 3, 6])
+        curr = Conv2D(num_classes,
                       (3, 3),
                       activation='relu',
                       padding='same')(curr)
@@ -300,11 +342,11 @@ def main():
                                                 height_factor=h_fac,
                                                 width_factor=w_fac,
                                                 data_format='channels_last'))(curr)
-        out_layer = Dense(1,
+        out_layer = Dense(num_classes,
                           activation='softmax')(curr)
         model = Model(in_layer, out_layer)
-        model.compile(loss=sparse_categorical_crossentropy,
-                      optimizer=RMSprop(lr=0.00),
+        model.compile(loss=CategoricalCrossentropy(from_logits=True),
+                      optimizer=Adam(lr=0.01),
                       metrics=['accuracy'])
         reduce_lr = ReduceLROnPlateau(monitor='loss',
                                       factor=0.75,
@@ -314,48 +356,101 @@ def main():
                                       min_delta=0.01,
                                       cooldown=2,
                                       min_lr=0.000001)
-        num_epochs = 5
         model.summary()
         hist = model.fit(train_ds,
-                         steps_per_epoch=64,
+                         steps_per_epoch=steps_per_epoch,
                          batch_size=batch_size,
                          epochs=num_epochs,
                          validation_data=val_ds,
+                         validation_steps=8,
                          use_multiprocessing=True,
-                         workers=4,
+                         workers=8,
                          callbacks=[reduce_lr])
         model.save("coarse_" + base_model_name)
         plot_history(hist)
-    if fine_train and train_model:
+        if not fine_train and not use_test:
+            test_ds = val_ds
+    # now that we have a model trained on the rough images, lets do the smaller ds of the finely labeled images
+    if fine_train:
+        # check if we are only doing a fine train of a pre defined coarse trained model
+        if not coarse_train:
+            model = load_model("coarse_" + base_model_name)
         train_ds = load_tf_records(records_path=os.path.join(record_root, 'train2'),
                                    image_res=input_image_res,
                                    batch_size=batch_size)
         val_ds = load_tf_records(records_path=os.path.join(record_root, 'val2'),
                                  image_res=input_image_res,
                                  batch_size=batch_size)
+        # build the model now with a much lower learning rate
+        model.compile(loss=CategoricalCrossentropy(from_logits=True),
+                      optimizer=Adam(lr=0.0001),
+                      metrics=['accuracy'])
+        reduce_lr = ReduceLROnPlateau(monitor='loss',
+                                      factor=0.75,
+                                      patience=6,
+                                      verbose=1,
+                                      mode='auto',
+                                      min_delta=0.01,
+                                      cooldown=2,
+                                      min_lr=0.000001)
+        hist = model.fit(train_ds,
+                         initial_epoch=num_epochs,
+                         steps_per_epoch=steps_per_epoch,
+                         batch_size=batch_size,
+                         num_epochs=num_epochs_fine,
+                         validation_data=val_ds,
+                         validation_steps=8,
+                         use_multiprocessing=True,
+                         workers=8,
+                         callbacks=[reduce_lr])
+        model.save("fine_" + base_model_name)
+        plot_history(hist)
         if use_test:
             test_ds = load_tf_records(records_path=os.path.join(record_root, "test"),
                                       image_res=input_image_res,
                                       batch_size=batch_size)
-            # extra training code here
-
-
-
-            model.save("coarse_" + base_model_name)
         else:
             test_ds = val_ds
-    if not train_model:
-        model = Model.load_weights(force_model_name)
+    # we are just evaluating the model that we have trained
+    if not fine_train or not coarse_train:
+        model = load_model(force_model_name)
         if use_test:
             test_ds = load_tf_records(records_path=os.path.join(record_root, "test"),
                                       image_res=input_image_res,
                                       batch_size=batch_size)
-            model.save("coarse_" + base_model_name)
         else:
-            test_ds = val_ds
+            test_ds = load_tf_records(records_path=os.path.join(record_root, "val2"),
+                                      image_res=input_image_res,
+                                      batch_size=batch_size)
 
-
-
+    # time to evaluate the model on our test data
+    x_visualize = []
+    y_visualize = []
+    total_samps = 0
+    for img_batch, label_batch in test_ds.as_numpy_iterator():
+        total_samps += img_batch.shape[0]
+        x_visualize.append(img_batch)
+        y_visualize.append(label_batch)
+        if total_samps > test_num:
+            break
+    x_eval = np.vstack(x_visualize)
+    y_eval = np.vstack(y_visualize)
+    y_pred = model.predict(x_eval)
+    names = ['unlabeled', 'ego_vehicle', 'rectification_border', 'out_of_roi', 'static', 'dynamic', 'ground',
+             'road', 'sidewalk', 'parking', 'rail_track', 'building', 'wall', 'fence', 'guard_rail', 'bridge',
+             'tunnel', 'pole', 'polegroup', 'traffic_light', 'traffic_sign', 'vegetation', 'terrain', 'sky',
+             'person', 'rider', 'car', 'truck', 'bus', 'caravan', 'trailer', 'train', 'motorcycle', 'bicycle']
+    print(sklearn.metrics.classification_report(y_eval, y_pred, target_names=names))
+    confusion_matrix = sklearn.metrics.confusion_matrix(y_pred=y_pred,
+                                                        y_true=y_eval)
+    np.set_printoptions(precision=2)
+    plt.figure()
+    plot_confusion_matrix(confusion_matrix, classes=names,
+                          title='Confusion matrix, without normalization')
+    plt.figure()
+    plot_confusion_matrix(confusion_matrix, classes=names, normalize=True,
+                          title='Normalized confusion matrix')
+    plt.show()
 
 
 
