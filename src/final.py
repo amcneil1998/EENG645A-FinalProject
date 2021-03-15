@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.applications import ResNet50, VGG19
+from tensorflow.keras.applications import ResNet50, VGG16
 import tensorflow.keras.backend as K
 import matplotlib.pyplot as plt
 import sklearn.metrics
@@ -247,18 +247,18 @@ def make_psp_module(prev_layer,
     last_size = prev_layer.shape[-1]
     out_layers = [prev_layer]
     for factor in pool_factors:
-        out_layers.append(pool_layer(prev_layer, factor, last_size))
+        out_layers.append(pool_layer(prev_layer, factor, 512))
     # combine all the layers together
-    curr = Concatenate()(out_layers)
+    curr = Concatenate(axis=-1)(out_layers)
     return curr
 
 def main():
     # the constants that we use, and need to go with from the start
     batch_size = 16
     num_classes = 34
-    num_epochs = 50
-    steps_per_epoch = 32
-    num_epochs_fine = 10
+    num_epochs = 1000
+    steps_per_epoch = 4
+    num_epochs_fine = 100
     # (Width, Height)
     input_image_res = (192, 384)
     data_root = os.path.join("/opt", "data")
@@ -267,9 +267,9 @@ def main():
     coarse_train = True
     fine_train = True
     use_test = False
-    test_num = 1000
+    test_num = 256
     base_model_name = "model.h5"
-    force_model_name = "FinalModel.h5"
+    force_model_name = "coarse_model.h5"
 
     if make_records:
         raw_data_root = os.path.join(data_root, "FinalProject", "CityScapes")
@@ -318,35 +318,40 @@ def main():
         test_ds = val_ds
         # model construction here
         in_layer = Input((input_image_res[0], input_image_res[1], 3))
+        '''
         res_net = ResNet50(include_top=False,
                            weights='imagenet',
                            input_tensor=in_layer,
                            input_shape=(input_image_res[0], input_image_res[1], 3),
                            pooling=None)(in_layer)
         res_net.trainable = False
-        vgg_net = VGG19(include_top=False,
+        '''
+        vgg_net = VGG16(include_top=False,
                         weights='imagenet',
                         input_tensor=in_layer,
                         input_shape=(input_image_res[0], input_image_res[1], 3),
                         pooling=None)(in_layer)
         vgg_net.trainable = False
-        curr = Concatenate()([res_net, vgg_net])
+        # curr = Concatenate()([res_net, vgg_net])
+        curr = vgg_net
         curr = make_psp_module(curr, [1, 2, 3, 6])
-        curr = Conv2D(num_classes,
+        curr = Conv2D(512,
                       (3, 3),
                       activation='relu',
                       padding='same')(curr)
+        curr = Conv2D(num_classes,
+                      (3, 3),
+                      padding='same',
+                      activation='softmax')(curr)
         h_fac = int(input_image_res[0]/curr.shape[1])
         w_fac = int(input_image_res[1]/curr.shape[2])
         curr = Lambda(lambda x: K.resize_images(x,
                                                 height_factor=h_fac,
                                                 width_factor=w_fac,
                                                 data_format='channels_last'))(curr)
-        out_layer = Dense(num_classes,
-                          activation='softmax')(curr)
-        model = Model(in_layer, out_layer)
+        model = Model(in_layer, curr)
         model.compile(loss=CategoricalCrossentropy(from_logits=True),
-                      optimizer=Adam(lr=0.01),
+                      optimizer=RMSprop(lr=0.001),
                       metrics=['accuracy'])
         reduce_lr = ReduceLROnPlateau(monitor='loss',
                                       factor=0.75,
@@ -362,7 +367,7 @@ def main():
                          batch_size=batch_size,
                          epochs=num_epochs,
                          validation_data=val_ds,
-                         validation_steps=8,
+                         validation_steps=1,
                          use_multiprocessing=True,
                          workers=8,
                          callbacks=[reduce_lr])
@@ -397,9 +402,9 @@ def main():
                          initial_epoch=num_epochs,
                          steps_per_epoch=steps_per_epoch,
                          batch_size=batch_size,
-                         num_epochs=num_epochs_fine,
+                         epochs=num_epochs_fine + num_epochs,
                          validation_data=val_ds,
-                         validation_steps=8,
+                         validation_steps=1,
                          use_multiprocessing=True,
                          workers=8,
                          callbacks=[reduce_lr])
@@ -412,7 +417,7 @@ def main():
         else:
             test_ds = val_ds
     # we are just evaluating the model that we have trained
-    if not fine_train or not coarse_train:
+    if not fine_train and not coarse_train:
         model = load_model(force_model_name)
         if use_test:
             test_ds = load_tf_records(records_path=os.path.join(record_root, "test"),
@@ -435,7 +440,11 @@ def main():
             break
     x_eval = np.vstack(x_visualize)
     y_eval = np.vstack(y_visualize)
-    y_pred = model.predict(x_eval)
+    y_pred = model.predict(x_eval, batch_size=1)
+    y_eval = np.argmax(y_eval, axis=-1)
+    y_eval = y_eval.reshape(y_eval.shape[0] * y_eval.shape[1] * y_eval.shape[2])
+    y_pred = np.argmax(y_pred, axis=-1)
+    y_pred = y_pred.reshape(y_pred.shape[0] * y_pred.shape[1] * y_pred.shape[2])
     names = ['unlabeled', 'ego_vehicle', 'rectification_border', 'out_of_roi', 'static', 'dynamic', 'ground',
              'road', 'sidewalk', 'parking', 'rail_track', 'building', 'wall', 'fence', 'guard_rail', 'bridge',
              'tunnel', 'pole', 'polegroup', 'traffic_light', 'traffic_sign', 'vegetation', 'terrain', 'sky',
