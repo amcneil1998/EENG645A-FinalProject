@@ -8,7 +8,8 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
 from tensorflow.keras.losses import sparse_categorical_crossentropy
 from tensorflow.keras.models import Model
-from tensorflow.keras.applications import ResNet50, InceptionV3
+from tensorflow.keras.applications import ResNet50, VGG19
+import tensorflow.keras.backend as K
 import matplotlib.pyplot as plt
 
 
@@ -100,7 +101,7 @@ def make_tf_records(input_loc,
                 in_img = cv2.imread(input_files[j])
                 # the labels are stored identically across all 3 channels on these images
                 # we can use sparse catigorical entropy
-                out_img = cv2.imread(output_files[j])[:, :, 0]
+                out_img = cv2.imread(output_files[j])
                 in_bytes = in_img.tostring()
                 out_bytes = out_img.tostring()
                 data = {
@@ -145,8 +146,8 @@ def load_tf_records(records_path,
         x_done = tf.image.resize(x_full_res, image_res)
         y_sample = parsed['input']
         y_raw = tf.io.decode_raw(y_sample, np.uint8)
-        y_full_res = tf.cast(tf.reshape(y_raw, (1024, 2048, 1)), tf.float32)
-        y_done = tf.image.resize(y_full_res, image_res)
+        y_full_res = tf.cast(tf.reshape(y_raw, (1024, 2048, 3)), tf.float32)
+        y_done = tf.image.resize(y_full_res, image_res)[:, :, 0:1]
         return x_done, y_done
     filenames_list = os.listdir(records_path)
     filename_strings = [os.path.join(records_path, filename) for filename in filenames_list]
@@ -171,22 +172,28 @@ def pool_layer(prev_layer,
     :param conv_layer_size: The number of filters in the convolutional layer
     :return: PSPNet style pooling layer that has been properly resized
     '''
-    curr = AveragePooling2D(pool_size,
+    size_1 = int(prev_layer.shape[1]/pool_size)
+    size_2 = int(prev_layer.shape[2]/pool_size)
+    curr = AveragePooling2D((size_1, size_2),
                             data_format='channels_last',
-                            strides=pool_size,
-                            padding='same')(prev_layer)
+                            padding='valid')(prev_layer)
     # while it might be strange to look at a 1x1 conv layer, this is what the paper says.
     curr = Conv2D(conv_layer_size,
                   kernel_size=(1, 1),
                   strides=(1, 1),
                   data_format='channels_last',
-                  padding='same',
-                  use_bias=False)(curr)
+                  padding='same')(curr)
     curr = BatchNormalization()(curr)
     curr = Activation('relu')(curr)
     # now we need to resize the image
-    resize_shape = tf.shape(prev_layer)[1:3] # the first and last dimensions are meaningless
-    curr = Lambda(lambda curr: tf.image.resize(curr, resize_shape))(curr)
+    height = prev_layer.shape[1] # the first and last dimensions are meaningless
+    width = prev_layer.shape[2]
+    h_fac = int(height/pool_size)
+    w_fac = int(width/pool_size)
+    curr = Lambda(lambda x: K.resize_images(x,
+                                            height_factor=h_fac,
+                                            width_factor=w_fac,
+                                            data_format='channels_last'))(curr)
     return curr
 
 def make_psp_module(prev_layer,
@@ -199,12 +206,12 @@ def make_psp_module(prev_layer,
     '''
     if pool_factors is None:
         pool_factors = [1, 2, 3, 6]
-    last_size = tf.shape(prev_layer)[-1]
+    last_size = prev_layer.shape[-1]
     out_layers = [prev_layer]
     for factor in pool_factors:
         out_layers.append(pool_layer(prev_layer, factor, last_size))
     # combine all the layers together
-    curr = Concatenate(axis=-1)(out_layers)
+    curr = Concatenate()(out_layers)
     return curr
 
 def main():
@@ -215,7 +222,7 @@ def main():
     data_root = os.path.join("/opt", "data")
     record_root = os.path.join(data_root, "CityScapes")
     train_model = True
-    make_records = False
+    make_records = True
     coarse_train = True
     fine_train = False
     use_test = False
@@ -272,18 +279,28 @@ def main():
         res_net = ResNet50(include_top=False,
                            weights='imagenet',
                            input_tensor=in_layer,
-                           pooling=None)
-        inception_net = InceptionV3(include_top=False,
-                                    weights='imagenet',
-                                    input_tensor=in_layer,
-                                    pooling=None)
-        curr = Concatenate(axis=-1)(res_net, inception_net)
-        curr = make_psp_module(curr)
-        curr = Conv2D(128,
+                           input_shape=(input_image_res[0], input_image_res[1], 3),
+                           pooling=None)(in_layer)
+        res_net.trainable = False
+        inception_net = VGG19(include_top=False,
+                              weights='imagenet',
+                              input_tensor=in_layer,
+                              input_shape=(input_image_res[0], input_image_res[1], 3),
+                              pooling=None)(in_layer)
+        inception_net.trainable = False
+        curr = Concatenate()([res_net, inception_net])
+        curr = make_psp_module(curr, [1, 2, 4, 8])
+        curr = Conv2D(1,
                       (3, 3),
-                      activation='relu')(curr)
-        curr = Lambda(lambda x: tf.image.resize(x, input_image_res))(curr)
-        out_layer = Dense(34,
+                      activation='relu',
+                      padding='same')(curr)
+        h_fac = int(input_image_res[0]/curr.shape[1])
+        w_fac = int(input_image_res[1]/curr.shape[2])
+        curr = Lambda(lambda x: K.resize_images(x,
+                                                height_factor=h_fac,
+                                                width_factor=w_fac,
+                                                data_format='channels_last'))(curr)
+        out_layer = Dense(1,
                           activation='softmax')(curr)
         model = Model(in_layer, out_layer)
         model.compile(loss=sparse_categorical_crossentropy,
@@ -297,9 +314,12 @@ def main():
                                       min_delta=0.01,
                                       cooldown=2,
                                       min_lr=0.000001)
+        num_epochs = 5
+        model.summary()
         hist = model.fit(train_ds,
                          steps_per_epoch=64,
-                         num_epochs=5,
+                         batch_size=batch_size,
+                         epochs=num_epochs,
                          validation_data=val_ds,
                          use_multiprocessing=True,
                          workers=4,
