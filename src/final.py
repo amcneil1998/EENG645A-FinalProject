@@ -3,8 +3,7 @@ import itertools
 import os
 import tensorflow as tf
 import cv2
-from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, BatchNormalization, Activation, Lambda, \
-    Concatenate
+from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, MaxPooling2D, BatchNormalization, Concatenate, Conv2DTranspose
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import RMSprop, Adam
 from tensorflow.keras.losses import CategoricalCrossentropy
@@ -198,67 +197,13 @@ def load_tf_records(records_path,
     dataset = dataset.batch(batch_size=batch_size).repeat()
     return dataset
 
-
-def pool_layer(prev_layer,
-               pool_size,
-               conv_layer_size):
-    '''
-    Makes a pooling layer for the PSP Net
-    :param prev_layer: The previous layer, which would be the input to the PSPNet module
-    :param pool_size: The size that we are making an average pool from
-    :param conv_layer_size: The number of filters in the convolutional layer
-    :return: PSPNet style pooling layer that has been properly resized
-    '''
-    size_1 = int(prev_layer.shape[1]/pool_size)
-    size_2 = int(prev_layer.shape[2]/pool_size)
-    curr = AveragePooling2D((size_1, size_2),
-                            data_format='channels_last',
-                            padding='valid')(prev_layer)
-    # while it might be strange to look at a 1x1 conv layer, this is what the paper says.
-    curr = Conv2D(conv_layer_size,
-                  kernel_size=(1, 1),
-                  strides=(1, 1),
-                  activation='relu',
-                  data_format='channels_last',
-                  padding='same')(curr)
-    curr = BatchNormalization()(curr)
-    curr = Activation('relu')(curr)
-    # now we need to resize the image
-    height = prev_layer.shape[1] # the first and last dimensions are meaningless
-    width = prev_layer.shape[2]
-    h_fac = int(height/pool_size)
-    w_fac = int(width/pool_size)
-    curr = Lambda(lambda x: K.resize_images(x,
-                                            height_factor=h_fac,
-                                            width_factor=w_fac,
-                                            data_format='channels_last'))(curr)
-    return curr
-
-def make_psp_module(prev_layer,
-                    pool_factors=None):
-    '''
-    Makes a PSP Model
-    :param prev_layer: The last layer from the traditional CNN
-    :param pool_factors: A list of the different pool factors, defaults to [1, 2, 3, 6], as per the PSPNet paper
-    :return: A PSPNet Module that can be used as a simple layer in the model.
-    '''
-    if pool_factors is None:
-        pool_factors = [1, 2, 3, 6]
-    last_size = prev_layer.shape[-1]
-    out_layers = [prev_layer]
-    for factor in pool_factors:
-        out_layers.append(pool_layer(prev_layer, factor, 512))
-    # combine all the layers together
-    curr = Concatenate(axis=-1)(out_layers)
-    return curr
-
 def main():
     # the constants that we use, and need to go with from the start
-    batch_size = 16
+    batch_size = 32
     num_classes = 34
-    num_epochs = 1000
-    steps_per_epoch = 4
-    num_epochs_fine = 100
+    num_epochs = 300
+    steps_per_epoch = 16
+    num_epochs_fine = 20
     # (Width, Height)
     input_image_res = (192, 384)
     data_root = os.path.join("/opt", "data")
@@ -318,40 +263,133 @@ def main():
         test_ds = val_ds
         # model construction here
         in_layer = Input((input_image_res[0], input_image_res[1], 3))
-        '''
-        res_net = ResNet50(include_top=False,
-                           weights='imagenet',
-                           input_tensor=in_layer,
-                           input_shape=(input_image_res[0], input_image_res[1], 3),
-                           pooling=None)(in_layer)
-        res_net.trainable = False
-        '''
-        vgg_net = VGG16(include_top=False,
-                        weights='imagenet',
-                        input_tensor=in_layer,
-                        input_shape=(input_image_res[0], input_image_res[1], 3),
-                        pooling=None)(in_layer)
-        vgg_net.trainable = False
-        # curr = Concatenate()([res_net, vgg_net])
-        curr = vgg_net
-        curr = make_psp_module(curr, [1, 2, 3, 6])
-        curr = Conv2D(512,
-                      (3, 3),
-                      activation='relu',
-                      padding='same')(curr)
-        curr = Conv2D(num_classes,
-                      (3, 3),
-                      padding='same',
-                      activation='softmax')(curr)
-        h_fac = int(input_image_res[0]/curr.shape[1])
-        w_fac = int(input_image_res[1]/curr.shape[2])
-        curr = Lambda(lambda x: K.resize_images(x,
-                                                height_factor=h_fac,
-                                                width_factor=w_fac,
-                                                data_format='channels_last'))(curr)
-        model = Model(in_layer, curr)
+        # Start making U net, all things will be notated as c for convolve, p for MaxPooling, and U for upscale/concat
+        # the number notates the layer of the U that it is on
+        # we are doing a 5 layer U
+        # first layer L
+        c1 = Conv2D(36,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(in_layer)
+        c1 = BatchNormalization()(c1)
+        c1 = Conv2D(36,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c1)
+        p1 = MaxPooling2D((2, 2), strides=2)(c1)
+        # second layer L
+        c2 = Conv2D(72,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(p1)
+        c2 = BatchNormalization()(c2)
+        c2 = Conv2D(72,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c2)
+        p2 = MaxPooling2D((2, 2), strides=2)(c2)
+        # third layer L
+        c3 = Conv2D(144,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(p2)
+        c3 = BatchNormalization()(c3)
+        c3 = Conv2D(144,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c3)
+        p3 = MaxPooling2D((2, 2), strides=2)(c3)
+        # fourth layer L
+        c4 = Conv2D(288,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(p3)
+        c4 = BatchNormalization()(c4)
+        c4 = Conv2D(288,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c4)
+        p4 = MaxPooling2D((2, 2), strides=2)(c4)
+        # bottom layer
+        c5 = Conv2D(576,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(p4)
+        c5 = BatchNormalization()(c5)
+        c5 = Conv2D(576,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c5)
+        # now start moving up
+        # going up involves upscaling below, concat across, then putting through 2 convolutional layers.
+        # 4th layer on the return
+        u4 = Conv2DTranspose(288,
+                             kernel_size=(3, 3),
+                             strides=(2, 2),
+                             padding='same')(c5)
+        u4 = Concatenate()([u4, c4])
+        c4 = Conv2D(288,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(u4)
+        c4 = BatchNormalization()(c4)
+        c4 = Conv2D(288,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c4)
+        # 3rd layer on the return
+        u3 = Conv2DTranspose(144,
+                             kernel_size=(3, 3),
+                             strides=(2, 2),
+                             padding='same')(c4)
+        u3 = Concatenate()([u3, c3])
+        c3 = Conv2D(144,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(u3)
+        c3 = BatchNormalization()(c3)
+        c3 = Conv2D(144,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c3)
+        # 2nd layer on the return
+        u2 = Conv2DTranspose(72,
+                             kernel_size=(3, 3),
+                             strides=(2, 2),
+                             padding='same')(c3)
+        u2 = Concatenate()([u2, c2])
+        c2 = Conv2D(72,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(u2)
+        c2 = BatchNormalization()(c2)
+        c2 = Conv2D(72,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c2)
+        # 1st layer on the return
+        u1 = Conv2DTranspose(36,
+                             kernel_size=(3, 3),
+                             strides=(2, 2),
+                             padding='same')(c2)
+        u1 = Concatenate()([u1, c1])
+        c1 = Conv2D(36,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(u1)
+        c1 = BatchNormalization()(c1)
+        c1 = Conv2D(36,
+                    kernel_size=(3, 3),
+                    kernel_initializer='he_normal',
+                    padding='same')(c1)
+        out = Conv2D(34,
+                     kernel_size=(1, 1),
+                     activation='softmax')(c1)
+
+        # End making U net
+        model = Model(in_layer, out)
         model.compile(loss=CategoricalCrossentropy(from_logits=True),
-                      optimizer=RMSprop(lr=0.001),
+                      optimizer=Adam(lr=0.001),
                       metrics=['accuracy'])
         reduce_lr = ReduceLROnPlateau(monitor='loss',
                                       factor=0.75,
@@ -369,8 +407,9 @@ def main():
                          validation_data=val_ds,
                          validation_steps=1,
                          use_multiprocessing=True,
-                         workers=8,
-                         callbacks=[reduce_lr])
+                         workers=8)
+                         #,
+                         #callbacks=[reduce_lr])
         model.save("coarse_" + base_model_name)
         plot_history(hist)
         if not fine_train and not use_test:
