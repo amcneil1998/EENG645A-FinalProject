@@ -82,10 +82,13 @@ def _bytes_feature(value):
 def make_tf_records(input_loc,
                     output_loc,
                     save_loc,
+                    evaluate=False,
                     max_per_record=4500):
     '''
     :param input_loc: os.path to the input data to be used for this record set
     :param output_loc: os.path to the output data to be used for this record set
+    :param save_loc: os.path to where we are putting the tf records
+    :param evaluate: lets you see the images going into the dataset, will not make a dataset
     :param max_per_record:
     :return: None, just writes tf record to disk for future use.
     '''
@@ -95,6 +98,7 @@ def make_tf_records(input_loc,
     for i in range(len(sub_dirs)):
         cur_dir = os.path.join(input_loc, sub_dirs[i])
         dir_files = os.listdir(cur_dir)
+        dir_files.sort() # <- the first part of the stupid line that cost me 2 days
         for j in range(len(dir_files)):
             # be safe and make sure that we only grab pictures
             if dir_files[j].endswith(".png"):
@@ -104,11 +108,25 @@ def make_tf_records(input_loc,
     for i in range(len(sub_dirs)):
         cur_dir = os.path.join(output_loc, sub_dirs[i])
         dir_files = os.listdir(cur_dir)
+        dir_files.sort() # <- the stupid line that cost me two days
         for j in range(len(dir_files)):
             # we only want the labelIds ones, these take up less space and make it easier to encode
             if dir_files[j].endswith("labelIds.png"):
                 output_files.append(os.path.join(cur_dir, dir_files[j]))
-
+    if evaluate:
+        print(input_files[0])
+        print(output_files[0])
+        print(input_files[8953])
+        print(output_files[8953])
+        print(input_files[-1])
+        print(output_files[-1])
+        in_img = cv2.imread(input_files[999])
+        out_img = cv2.imread(output_files[999])
+        img = np.hstack((in_img, out_img))
+        cv2.imshow('image', img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        exit()
     if len(input_files) != len(output_files):
         print("Failed to create with input: " + input_loc + "and output: " + output_loc)
         print("Num input files: " + str(len(input_files)))
@@ -123,7 +141,7 @@ def make_tf_records(input_loc,
     num_records = int(num_images / max_per_record) + 1
     tf_record_names = [save_loc + f'/data{idx}' for idx in range(num_records)]
     record_index = 0
-
+    print("Starting to process images to: " + save_loc)
     # loop over each tf record, i=tf record
     for i in range(num_records):
         with tf.io.TFRecordWriter(str(tf_record_names[i])) as writer:
@@ -147,8 +165,8 @@ def make_tf_records(input_loc,
                 serialized = example.SerializeToString()
                 writer.write(serialized)
         # this gets us the correct index and we only have to think in terms of i and j
-        print("Processed " + str(record_index) + " Images")
         record_index += 4500
+        print("Processed: " + str(record_index) + " images")
 
 def load_tf_records(records_path,
                     image_res,
@@ -193,7 +211,7 @@ def load_tf_records(records_path,
                                       num_parallel_reads=tf.data.experimental.AUTOTUNE)
     dataset = dataset.map(map_func=parser,
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.shuffle(buffer_size=batch_size * shuffle_size)
+    #dataset = dataset.shuffle(buffer_size=batch_size * shuffle_size)S
     dataset = dataset.batch(batch_size=batch_size).repeat()
     return dataset
 
@@ -209,9 +227,9 @@ def main():
     data_root = os.path.join("/opt", "data")
     record_root = os.path.join(data_root, "CityScapes")
     make_records = False
-    coarse_train = True
-    fine_train = True
-    use_test = False
+    coarse_train = False
+    fine_train = False
+    use_test = True
     test_num = 256
     base_model_name = "model.h5"
     force_model_name = "coarse_model.h5"
@@ -392,7 +410,7 @@ def main():
                       optimizer=Adam(lr=0.001),
                       metrics=['accuracy'])
         reduce_lr = ReduceLROnPlateau(monitor='loss',
-                                      factor=0.75,
+                                      factor=0.85,
                                       patience=6,
                                       verbose=1,
                                       mode='auto',
@@ -407,9 +425,8 @@ def main():
                          validation_data=val_ds,
                          validation_steps=1,
                          use_multiprocessing=True,
-                         workers=8)
-                         #,
-                         #callbacks=[reduce_lr])
+                         workers=8,
+                         callbacks=[reduce_lr])
         model.save("coarse_" + base_model_name)
         plot_history(hist)
         if not fine_train and not use_test:
@@ -480,9 +497,15 @@ def main():
     x_eval = np.vstack(x_visualize)
     y_eval = np.vstack(y_visualize)
     y_pred = model.predict(x_eval, batch_size=1)
+    cv2.destroyAllWindows()
     y_eval = np.argmax(y_eval, axis=-1)
-    y_eval = y_eval.reshape(y_eval.shape[0] * y_eval.shape[1] * y_eval.shape[2])
     y_pred = np.argmax(y_pred, axis=-1)
+    ex = np.hstack((x_eval[0],
+                    np.stack((y_eval[0], y_eval[0], y_eval[0]), axis=-1)/35.0,
+                    np.stack((y_pred[0], y_pred[0], y_pred[0]), axis=-1)/35.0))
+    cv2.imshow('image', ex)
+    cv2.waitKey(0)
+    y_eval = y_eval.reshape(y_eval.shape[0] * y_eval.shape[1] * y_eval.shape[2])
     y_pred = y_pred.reshape(y_pred.shape[0] * y_pred.shape[1] * y_pred.shape[2])
     names = ['unlabeled', 'ego_vehicle', 'rectification_border', 'out_of_roi', 'static', 'dynamic', 'ground',
              'road', 'sidewalk', 'parking', 'rail_track', 'building', 'wall', 'fence', 'guard_rail', 'bridge',
