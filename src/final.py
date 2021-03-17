@@ -3,13 +3,11 @@ import itertools
 import os
 import tensorflow as tf
 import cv2
-from tensorflow.keras.layers import Input, Dense, Conv2D, AveragePooling2D, MaxPooling2D, BatchNormalization, Concatenate, Conv2DTranspose
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, BatchNormalization, Concatenate, Conv2DTranspose
 from tensorflow.keras.callbacks import ReduceLROnPlateau
-from tensorflow.keras.optimizers import RMSprop, Adam
+from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.applications import ResNet50, VGG16
-import tensorflow.keras.backend as K
 import matplotlib.pyplot as plt
 import sklearn.metrics
 
@@ -226,9 +224,9 @@ def main():
     input_image_res = (192, 384)
     data_root = os.path.join("/opt", "data")
     record_root = os.path.join(data_root, "CityScapes")
-    make_records = False
-    coarse_train = False
-    fine_train = False
+    make_records = True
+    coarse_train = True
+    fine_train = True
     use_test = True
     test_num = 256
     base_model_name = "model.h5"
@@ -416,7 +414,7 @@ def main():
                                       mode='auto',
                                       min_delta=0.01,
                                       cooldown=2,
-                                      min_lr=0.000001)
+                                      min_lr=0.0000001)
         model.summary()
         hist = model.fit(train_ds,
                          steps_per_epoch=steps_per_epoch,
